@@ -72,7 +72,7 @@ def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username = '" + username + "'"
+    query = "SELECT id, username, email FROM users WHERE username LIKE '" + username + "' ORDER BY username"
     try:
         cur.execute(query)
         rows = cur.fetchall()
@@ -81,12 +81,13 @@ def search():
     return {"query": query, "results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIXED: Pass user input as a template variable so Jinja2 auto-escaping
+# treats it as literal text. This prevents both SSTI (template expressions
+# are no longer interpreted) and reflected XSS (HTML/JS is escaped).
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Hello, " + name + "!</h1>"
-    return render_template_string(template)
+    return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=name)
 
 
 # VULN #4: OS Command Injection — user input passed to a shell.
@@ -94,7 +95,7 @@ def greet():
 def ping():
     host = request.args.get("host", "127.0.0.1")
     output = subprocess.check_output(
-        "ping -c 1 " + host, shell=True, stderr=subprocess.STDOUT
+        "ping -c 2 " + host, shell=True, stderr=subprocess.STDOUT
     )
     return "<pre>" + output.decode(errors="replace") + "</pre>"
 
