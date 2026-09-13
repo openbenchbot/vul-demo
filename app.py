@@ -6,6 +6,7 @@ Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
 import functools
+import hmac
 import os
 import re
 import sqlite3
@@ -19,6 +20,9 @@ app = Flask(__name__)
 DB_PATH = "users.db"
 
 # FIXED #1: Hardcoded secret / credentials - now loaded from environment variables without insecure fallbacks.
+# Previously SECRET_KEY and ADMIN_PASSWORD were hardcoded as literal strings in source,
+# exposing cryptographic material and credentials. Now they are loaded from environment
+# variables and the app fails fast if they are not set.
 SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("FLASK_SECRET_KEY not set")
@@ -68,10 +72,11 @@ def require_auth(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         auth = request.authorization
+        # Use hmac.compare_digest to prevent timing attacks on password verification
         if (
             not auth
             or auth.username != "admin"
-            or auth.password != ADMIN_PASSWORD
+            or not hmac.compare_digest(auth.password, ADMIN_PASSWORD)
         ):
             return Response(
                 "Could not verify your access level for that URL.\n"
@@ -105,22 +110,28 @@ def search():
     db = get_db()
     cur = db.cursor()
     # Use parameterized query to prevent SQL injection via username parameter
-    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
+    # FIX: Omit sensitive email field and raw SQL query from response to prevent data exposure
+    query = "SELECT id, username FROM users WHERE username LIKE ? ORDER BY username"
     try:
         cur.execute(query, (username,))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+    return {"results": rows}
 
 
-# FIXED #3: Reflected XSS — untrusted input is passed as a variable to the template, relying on Jinja2 auto-escaping.
+# FIXED #3: Reflected XSS — untrusted input is explicitly escaped with markupsafe.escape()
+# before being passed to the template. escape() returns a Markup object, so Jinja2's
+# auto-escaping will not double-escape it.
 # FIX: Added @require_auth to enforce authentication before rendering greeting.
 @app.route("/greet")
 @require_auth
 def greet():
     name = request.args.get("name", "")
-    return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=name)
+    # Explicitly escape user input to prevent reflected XSS; Markup objects are
+    # recognized by Jinja2 and will not be double-escaped.
+    safe_name = escape(name)
+    return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=safe_name)
 
 
 # FIXED #4: OS Command Injection — input is now validated and passed as a list without shell=True.
