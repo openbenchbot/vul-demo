@@ -5,6 +5,7 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import os
 import sqlite3
 import subprocess
 
@@ -14,8 +15,10 @@ app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
+# FIXED: Load secret key from environment variable instead of hardcoding it
+SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("FLASK_SECRET_KEY environment variable not set")
 ADMIN_PASSWORD = "admin123"
 app.config["SECRET_KEY"] = SECRET_KEY
 
