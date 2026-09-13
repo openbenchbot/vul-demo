@@ -5,6 +5,7 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import os
 import re
 import socket
 import sqlite3
@@ -202,5 +203,8 @@ def ping():
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIX #5: Debug mode enabled via environment variable, defaulting to False.
+    # When debug is True, bind only to 127.0.0.1 to avoid exposing the Werkzeug
+    # interactive debugger and its deterministic PIN to external networks.
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host="127.0.0.1" if debug else "0.0.0.0", port=5000, debug=debug)
