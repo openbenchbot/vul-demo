@@ -13,6 +13,7 @@ from functools import wraps
 from urllib.parse import urlparse, urljoin
 
 from flask import Flask, request, render_template_string, g, session, redirect, url_for, Response
+from markupsafe import escape
 
 # FIXED: Added Flask-WTF import for CSRF protection on the login form.
 from flask_wtf import FlaskForm
@@ -161,14 +162,19 @@ def search():
     return {"query": query, "results": rows}
 
 
-# FIXED: Reflected XSS — user input is now rendered via Jinja2 auto-escaping.
+# FIXED: Server-Side Template Injection — the /greet endpoint no longer uses
+# render_template_string. Instead it returns a plain response with the user
+# input explicitly escaped via markupsafe.escape(). This removes any template
+# evaluation path entirely, eliminating the risk of SSTI while preserving
+# automatic HTML escaping for reflected XSS protection.
 @app.route("/greet")
 @login_required
 def greet():
     name = request.args.get("name", "")
-    # Pass name as a template variable so Jinja2 escapes it automatically,
-    # preventing reflected XSS from manual string concatenation.
-    return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=name)
+    # Explicitly escape user input with markupsafe.escape() and return a plain
+    # string response. No Jinja2 template rendering is performed, so there is
+    # no opportunity for template expressions in user input to be evaluated.
+    return f"<h1>Welcome, {escape(name)}!</h1>"
 
 
 # FIXED: OS Command Injection — the host parameter is now validated against a
