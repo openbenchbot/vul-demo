@@ -7,6 +7,7 @@ Do NOT deploy it anywhere public. Local scanning/testing only.
 
 import sqlite3
 import subprocess
+import re
 
 from flask import Flask, request, render_template_string, g
 
@@ -89,12 +90,16 @@ def greet():
     return render_template_string(template)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIXED: OS Command Injection — user input is now validated and passed as a list to avoid shell=True.
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
+    # Validate host to ensure it's a legitimate hostname or IP address
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", host):
+        return "Invalid host", 400
+    # Avoid invoking a shell; use a list argument to subprocess
     output = subprocess.check_output(
-        "ping -c 2 " + host, shell=True, stderr=subprocess.STDOUT
+        ["ping", "-c", "2", host], stderr=subprocess.STDOUT
     )
     return "<pre>" + output.decode(errors="replace") + "</pre>"
 
