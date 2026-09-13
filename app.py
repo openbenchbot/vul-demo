@@ -19,8 +19,17 @@ DB_PATH = "users.db"
 
 # FIXED: Load secret key and credentials from environment variables instead of hardcoding them.
 SECRET_KEY = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32)
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+# FIXED: Require ADMIN_PASSWORD to be set and non-empty at startup to prevent authentication bypass via empty password.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+if not ADMIN_PASSWORD:
+    raise RuntimeError("ADMIN_PASSWORD environment variable must be set and non-empty")
 app.config["SECRET_KEY"] = SECRET_KEY
+# FIXED: Enforce secure session cookie attributes to prevent interception and client-side access.
+app.config.update({
+    "SESSION_COOKIE_SECURE": True,
+    "SESSION_COOKIE_HTTPONLY": True,
+    "SESSION_COOKIE_SAMESITE": "Lax",
+})
 
 
 def get_db():
