@@ -66,19 +66,22 @@ def index():
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIXED #2: SQL Injection — fixed via parameterized queries and generic error messages.
 @app.route("/search")
 def search():
     username = request.args.get("username", "")
+    # Defense-in-depth: limit input length
+    if len(username) > 100:
+        return "Invalid input", 400
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE '" + username + "' ORDER BY username"
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (f"%{username}%",))
         rows = cur.fetchall()
     except Exception as e:
-        return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+        return "Query error", 500
+    return {"results": rows}
 
 
 # VULN #3: Reflected XSS — untrusted input rendered without escaping.
