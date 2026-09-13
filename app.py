@@ -21,6 +21,14 @@ ADMIN_PASSWORD = "admin123"
 app.config["SECRET_KEY"] = SECRET_KEY
 
 
+# Defense-in-depth: set a Content-Security-Policy header on all responses
+# to mitigate reflected XSS even if a template escaping issue is reintroduced.
+@app.after_request
+def set_csp(response):
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'"
+    return response
+
+
 def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(DB_PATH)
@@ -82,7 +90,11 @@ def search():
     return {"query": query, "results": rows}
 
 
-# FIXED: Reflected XSS — untrusted input is now rendered using Jinja2's automatic escaping.
+# FIXED: Server-Side Template Injection and Reflected XSS — untrusted input is
+# now passed as a Jinja2 template variable so that auto-escaping is applied.
+# String concatenation into the template source has been removed, preventing
+# evaluation of Jinja2 expressions (SSTI) and raw HTML/JS injection (XSS).
+# A CSP header (see set_csp above) is added as defense-in-depth.
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
