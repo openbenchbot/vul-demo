@@ -140,14 +140,15 @@ def search():
     return {"results": rows}
 
 
-# FIX #3: Reflected XSS mitigated by manually escaping user input with markupsafe.escape before concatenation.
+# FIX #3: Reflected XSS and SSTI mitigated by passing user input as a Jinja2 template
+# variable rather than concatenating it into the template string. Jinja2 auto-escapes
+# template variables ({{ name }}) by default, preventing both HTML/script injection
+# and Jinja2 expression evaluation (SSTI).
 @app.route("/greet")
 @login_required
 def greet():
     name = request.args.get("name", "")
-    safe_name = escape(name)
-    template = "<h1>Welcome, " + safe_name + "!</h1>"
-    return render_template_string(template)
+    return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=name)
 
 
 # FIX #4: SSRF / network scanning mitigated by:
