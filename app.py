@@ -5,6 +5,8 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import os
+import secrets
 import sqlite3
 import subprocess
 from functools import wraps
@@ -15,9 +17,9 @@ app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
+# FIXED: Load secret key and credentials from environment variables instead of hardcoding them.
+SECRET_KEY = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32)
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 app.config["SECRET_KEY"] = SECRET_KEY
 
 
@@ -55,12 +57,11 @@ def init_db():
     conn.close()
 
 
-# FIXED: Added authentication and authorization controls.
-# A login_required decorator is used to protect sensitive routes.
+# FIXED: Enhanced the login_required decorator to verify the user has the correct role.
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("user"):
+        if session.get("user") != "admin":
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
@@ -90,9 +91,9 @@ def login():
         return "Invalid credentials", 401
     return render_template_string(
         """
-        <form method="post">
-            <input type="password" name="password" placeholder="Admin password">
-            <button type="submit">Login</button>
+        <form method=\"post\">
+            <input type=\"password\" name=\"password\" placeholder=\"Admin password\">
+            <button type=\"submit\">Login</button>
         </form>
         """
     )
@@ -106,15 +107,22 @@ def logout():
 
 # VULN #2: SQL Injection — user input concatenated directly into the query.
 # FIXED: Using parameterized query to prevent SQL injection, and removed raw query from response.
+# FIXED: IDOR — restrict results to the currently authenticated user's own record and
+# exclude the sensitive email field from the response to prevent data exposure.
 @app.route("/search")
 @login_required
 def search():
     username = request.args.get("username", "")
+    current_user = session.get("user", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
+    # Only return the authenticated user's own record; drop email to avoid PII exposure.
+    query = (
+        "SELECT id, username FROM users "
+        "WHERE username LIKE ? AND username = ? ORDER BY username"
+    )
     try:
-        cur.execute(query, (username,))
+        cur.execute(query, (username, current_user))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
