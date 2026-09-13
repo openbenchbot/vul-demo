@@ -104,5 +104,8 @@ def ping():
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIXED: Debug mode is no longer hard-coded to True. It defaults to off
+    # and must be explicitly enabled via the FLASK_DEBUG environment variable.
+    # In production, use a WSGI server such as gunicorn instead of app.run().
+    debug = os.getenv("FLASK_DEBUG", "false").strip().lower() in ("1", "true", "yes")
+    app.run(host="0.0.0.0", port=5000, debug=debug)
