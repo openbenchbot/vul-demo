@@ -68,10 +68,12 @@ def index():
 
 
 # FIXED #2: SQL Injection — fixed via parameterized queries and generic error messages.
-# FIXED #6: Missing auth/authorization and excessive data exposure — added auth check and dropped email from response.
+# FIXED #6: Missing auth/authorization and excessive data exposure — added auth check
+# before accessing user data and dropped email from the response to prevent PII leakage.
 @app.route("/search")
 def search():
-    # Enforce authentication before accessing user data
+    # Enforce authentication before accessing user data.
+    # If no authenticated user is present on g, reject with 401 Unauthorized.
     if not getattr(g, "user", None):
         abort(401)
 
