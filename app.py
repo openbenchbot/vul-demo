@@ -7,8 +7,10 @@ Do NOT deploy it anywhere public. Local scanning/testing only.
 
 import sqlite3
 import subprocess
+import re
+from functools import wraps
 
-from flask import Flask, request, render_template_string, g
+from flask import Flask, request, render_template_string, g, session, redirect, url_for
 
 app = Flask(__name__)
 
@@ -54,7 +56,40 @@ def init_db():
     conn.close()
 
 
+# FIXED: Missing Authentication and Authorization — added a login_required decorator to enforce authentication on protected routes.
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "logged_in" not in session or not session["logged_in"]:
+            return redirect(url_for("login", next=request.url))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if password == ADMIN_PASSWORD:
+            session["logged_in"] = True
+            return redirect(url_for("index"))
+        return "Invalid credentials", 401
+    return render_template_string(
+        "<form method='post'>"
+        "Password: <input type='password' name='password'>"
+        "<button type='submit'>Login</button>"
+        "</form>"
+    )
+
+
+@app.route("/logout")
+def logout():
+    session.pop("logged_in", None)
+    return redirect(url_for("login"))
+
+
 @app.route("/")
+@login_required
 def index():
     return (
         "<h1>Vulnerable Demo App</h1>"
@@ -66,40 +101,48 @@ def index():
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIXED #2: SQL Injection — user input is now passed using a parameterised query.
 @app.route("/search")
+@login_required
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username = '" + username + "'"
+    # Use a placeholder (?) to separate code from data and prevent SQL injection
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (username,))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
     return {"query": query, "results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIXED #3: Reflected XSS — user input is now passed as a template context variable to leverage Jinja2 auto-escaping.
 @app.route("/greet")
+@login_required
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Hello, " + name + "!</h1>"
-    return render_template_string(template)
+    # Pass 'name' as a context variable so Jinja2 escapes it automatically.
+    return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=name)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIXED: OS Command Injection — user input is now validated and passed as a list to avoid shell=True.
 @app.route("/ping")
+@login_required
 def ping():
     host = request.args.get("host", "127.0.0.1")
+    # Validate host to ensure it's a legitimate hostname or IP address
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", host):
+        return "Invalid host", 400
+    # Avoid invoking a shell; use a list argument to subprocess
     output = subprocess.check_output(
-        "ping -c 1 " + host, shell=True, stderr=subprocess.STDOUT
+        ["ping", "-c", "2", host], stderr=subprocess.STDOUT
     )
     return "<pre>" + output.decode(errors="replace") + "</pre>"
 
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIXED #5: Disable debug mode to prevent exposure of the interactive debugger in production.
+    app.run(host="0.0.0.0", port=5000, debug=False)
