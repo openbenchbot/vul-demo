@@ -5,20 +5,27 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import os
 import re
 import sqlite3
 import subprocess
 
-from flask import Flask, request, render_template_string, g
+from flask import Flask, request, render_template_string, g, abort
 
 app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
-app.config["SECRET_KEY"] = SECRET_KEY
+# FIX #1: Load SECRET_KEY from environment variable instead of hardcoding it.
+# Hardcoded keys allow attackers to forge session cookies. We read from the
+# environment and fail fast if it's not set. The unused hardcoded
+# ADMIN_PASSWORD is also removed.
+app.config["SECRET_KEY"] = os.environ["SECRET_KEY"]
+
+# FIX #7 (Missing Authentication): Load an API key from the environment that
+# callers must present to access any sensitive endpoint. This prevents
+# unauthenticated access to user data and internal functionality.
+API_KEY = os.environ.get("API_KEY", "")
 
 
 def get_db():
@@ -55,6 +62,20 @@ def init_db():
     conn.close()
 
 
+# FIX #7 (Missing Authentication): Enforce authentication on all sensitive
+# endpoints via a before_request handler. The public landing page ("/") remains
+# accessible, but every other route requires a valid API key supplied via the
+# X-API-Key header or api_key query parameter. Without this, unauthenticated
+# callers could retrieve user emails and invoke internal ping functionality.
+@app.before_request
+def require_auth():
+    if request.path == "/":
+        return
+    provided_key = request.headers.get("X-API-Key") or request.args.get("api_key")
+    if not API_KEY or not provided_key or provided_key != API_KEY:
+        abort(401)
+
+
 @app.route("/")
 def index():
     return (
@@ -71,18 +92,22 @@ def index():
 # string concatenation. The username value is passed as a bound parameter,
 # so any SQL metacharacters in user input are treated as literal data and
 # cannot alter the query structure.
+# FIX #6 (IDOR): The 'id' internal identifier is no longer selected or
+# returned in the response, preventing unauthenticated ID enumeration.
+# The raw SQL query string is also omitted from the response to avoid
+# leaking internal schema details.
 @app.route("/search")
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
+    query = "SELECT username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
         cur.execute(query, (username,))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+    return {"results": rows}
 
 
 # FIX #3: Use Jinja2 template variables instead of string concatenation.
@@ -129,5 +154,10 @@ def ping():
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIX #5: Debug mode controlled via environment variable instead of being
+    # hardcoded to True. Enabling Flask's interactive debugger on a publicly
+    # reachable interface allows unauthenticated attackers to execute arbitrary
+    # Python code via the debugger console. Debug mode now defaults to False
+    # and must be explicitly opted into via FLASK_DEBUG=true (for local dev).
+    debug_mode = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host="0.0.0.0", port=5000, debug=debug_mode)
