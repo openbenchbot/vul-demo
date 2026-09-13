@@ -9,7 +9,7 @@ import re
 import sqlite3
 import subprocess
 
-from flask import Flask, request, render_template_string, g
+from flask import Flask, request, render_template_string, g, abort
 
 app = Flask(__name__)
 
@@ -68,8 +68,13 @@ def index():
 
 
 # FIXED #2: SQL Injection — fixed via parameterized queries and generic error messages.
+# FIXED #6: Missing auth/authorization and excessive data exposure — added auth check and dropped email from response.
 @app.route("/search")
 def search():
+    # Enforce authentication before accessing user data
+    if not getattr(g, "user", None):
+        abort(401)
+
     username = request.args.get("username", "")
     # Defense-in-depth: limit input length
     if len(username) > 100:
@@ -82,7 +87,9 @@ def search():
         rows = cur.fetchall()
     except Exception as e:
         return "Query error", 500
-    return {"results": rows}
+    # Return only non-sensitive fields (omit email) to prevent personal data exposure
+    results = [{"id": r[0], "username": r[1]} for r in rows]
+    return {"results": results}
 
 
 # FIXED #3: Reflected XSS — pass user input as a template variable so Jinja2
