@@ -5,8 +5,11 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import re
 import sqlite3
 import subprocess
+import functools
+import os
 
 from flask import Flask, request, render_template_string, g
 
@@ -14,10 +17,32 @@ app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
+# FIXED: Hardcoded secret / credentials (scanners flag hardcoded secrets)
+# Secrets are now loaded securely from environment variables.
+SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 app.config["SECRET_KEY"] = SECRET_KEY
+
+
+# Defense-in-depth: set a Content-Security-Policy header on all responses
+# to mitigate reflected XSS even if a template escaping issue is reintroduced.
+@app.after_request
+def set_csp(response):
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'"
+    return response
+
+
+# FIXED: Missing Authentication and Authorization on All Endpoints
+# Added an auth_required decorator using HTTP Basic Auth to enforce
+# authentication on all routes.
+def auth_required(f):
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or auth.username != "admin" or auth.password != ADMIN_PASSWORD:
+            return ("Unauthorized", 401, {"WWW-Authenticate": "Basic realm='Login Required'"})
+        return f(*args, **kwargs)
+    return decorated
 
 
 def get_db():
@@ -55,6 +80,7 @@ def init_db():
 
 
 @app.route("/")
+@auth_required
 def index():
     return (
         "<h1>Vulnerable Demo App</h1>"
@@ -66,40 +92,63 @@ def index():
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIXED: SQL Injection — user input is now passed as a parameterised query
+# placeholder instead of being concatenated into the SQL string.
 @app.route("/search")
+@auth_required
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username = '" + username + "'"
+    # Use a placeholder (?) and pass username as a parameter to prevent SQL injection.
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (username,))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
     return {"query": query, "results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIXED: Server-Side Template Injection and Reflected XSS — untrusted input is
+# now passed as a Jinja2 template variable so that auto-escaping is applied.
+# String concatenation into the template source has been removed, preventing
+# evaluation of Jinja2 expressions (SSTI) and raw HTML/JS injection (XSS).
+# A CSP header (see set_csp above) is added as defense-in-depth.
 @app.route("/greet")
+@auth_required
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Hello, " + name + "!</h1>"
-    return render_template_string(template)
+    template = "<h1>Welcome, {{ name }}!</h1>"
+    return render_template_string(template, name=name)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIXED: OS Command Injection — validate host and use shell=False with list args.
 @app.route("/ping")
+@auth_required
 def ping():
     host = request.args.get("host", "127.0.0.1")
-    output = subprocess.check_output(
-        "ping -c 1 " + host, shell=True, stderr=subprocess.STDOUT
-    )
-    return "<pre>" + output.decode(errors="replace") + "</pre>"
+    # Validate host: only alphanumeric, dots, and hyphens allowed; max 255 chars.
+    if not re.match(r"^[a-zA-Z0-9.\-]+$", host) or len(host) > 255:
+        return "Invalid host", 400
+    try:
+        output = subprocess.check_output(
+            ["ping", "-c", "2", host],
+            shell=False,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        )
+        return "<pre>" + output.decode(errors="replace") + "</pre>"
+    except subprocess.TimeoutExpired:
+        return "Ping timed out", 504
+    except subprocess.CalledProcessError as e:
+        return "<pre>" + e.output.decode(errors="replace") + "</pre>", 500
 
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIXED: Debug mode disabled by default; only enabled if FLASK_DEBUG=true env var is set.
+    # This prevents exposure of the interactive debugger to remote users in production.
+    debug_mode = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
+    app.config['DEBUG'] = debug_mode
+    app.run(host="0.0.0.0", port=5000, debug=debug_mode)
