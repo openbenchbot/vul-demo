@@ -14,15 +14,22 @@ import time
 import functools
 
 from flask import Flask, request, render_template_string, g, abort, session, redirect
+from markupsafe import escape
 
 app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
+# FIX #1: Load secrets from environment variables to prevent hardcoded credentials and session forgery.
+SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 app.config["SECRET_KEY"] = SECRET_KEY
+
+# FIX #7: Configure secure session cookie attributes.
+# SESSION_COOKIE_SECURE ensures the cookie is only sent over HTTPS.
+# SESSION_COOKIE_SAMESITE="Lax" mitigates CSRF by restricting cross-site transmission.
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 # FIX #4: Whitelist of allowed hosts to prevent SSRF / network scanning.
 # Only explicitly permitted external hosts may be pinged.
@@ -116,28 +123,30 @@ def login():
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIX #2: SQL Injection mitigated by using parameterized queries instead of string concatenation.
+# Additionally, the raw SQL query is no longer exposed in the response to avoid information leakage.
 @app.route("/search")
 @login_required
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE '" + username + "' ORDER BY username"
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (username,))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+    return {"results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIX #3: Reflected XSS mitigated by manually escaping user input with markupsafe.escape before concatenation.
 @app.route("/greet")
 @login_required
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Welcome, " + name + "!</h1>"
+    safe_name = escape(name)
+    template = "<h1>Welcome, " + safe_name + "!</h1>"
     return render_template_string(template)
 
 
