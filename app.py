@@ -7,8 +7,9 @@ Do NOT deploy it anywhere public. Local scanning/testing only.
 
 import sqlite3
 import subprocess
+from functools import wraps
 
-from flask import Flask, request, render_template_string, g
+from flask import Flask, request, render_template_string, g, abort
 
 app = Flask(__name__)
 
@@ -54,6 +55,17 @@ def init_db():
     conn.close()
 
 
+# FIX: Added an authentication decorator to protect sensitive endpoints
+def auth_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Simple token-based authentication check for demonstration purposes
+        if request.headers.get("X-Auth-Token") != "valid-token":
+            abort(401, description="Authentication required")
+        return f(*args, **kwargs)
+    return decorated
+
+
 @app.route("/")
 def index():
     return (
@@ -68,25 +80,30 @@ def index():
 
 # VULN #2: SQL Injection — user input concatenated directly into the query.
 @app.route("/search")
+@auth_required
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE '" + username + "' ORDER BY username"
+    # FIX: Use a parameterized query with a placeholder to prevent SQL injection.
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (f"%{username}%",))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+    # FIX: Remove raw query from response to avoid exposing internal queries.
+    return {"results": rows}
 
 
 # VULN #3: Reflected XSS — untrusted input rendered without escaping.
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Welcome, " + name + "!</h1>"
-    return render_template_string(template)
+    # FIX: Pass `name` as a template variable with explicit escaping (|e) so
+    # untrusted input is HTML-escaped instead of being concatenated directly
+    # into the template string. This prevents reflected cross-site scripting.
+    return render_template_string("<h1>Welcome, {{ name|e }}!</h1>", name=name)
 
 
 # VULN #4: OS Command Injection — user input passed to a shell.
@@ -101,5 +118,5 @@ def ping():
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIX: Disabled debug mode to prevent exposing the interactive Werkzeug debugger to unauthenticated users.
+    app.run(host="0.0.0.0", port=5000, debug=False)
