@@ -106,6 +106,13 @@ class LoginForm(FlaskForm):
     password = PasswordField("Password", validators=[DataRequired()])
 
 
+# FIXED: Logout CSRF — added a FlaskForm subclass for the logout endpoint so
+# that POST requests are validated with a CSRF token. This prevents an
+# attacker from triggering logout via a forged cross-site GET request.
+class LogoutForm(FlaskForm):
+    pass
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     form = LoginForm()
@@ -134,8 +141,15 @@ def login():
     )
 
 
-@app.route("/logout")
+# FIXED: Logout CSRF — changed /logout to accept only POST requests and
+# validate the CSRF token via a FlaskForm. This prevents an attacker from
+# triggering logout through a forged GET request (e.g., an embedded image tag).
+@app.route("/logout", methods=["POST"])
+@login_required
 def logout():
+    form = LogoutForm()
+    if not form.validate_on_submit():
+        return "Invalid CSRF token", 400
     session.clear()
     return redirect(url_for("login"))
 
@@ -143,14 +157,24 @@ def logout():
 @app.route("/")
 @login_required
 def index():
+    # FIXED: Logout CSRF — replaced the plain GET link with a POST form that
+    # includes a CSRF token, so the logout request cannot be forged by an
+    # attacker embedding a cross-site GET request (e.g., an <img> tag).
+    logout_form = LogoutForm()
     return (
         "<h1>Vulnerable Demo App</h1>"
         "<ul>"
         "<li><a href='/search?username=alice'>User search (SQL injection)</a></li>"
         "<li><a href='/greet?name=World'>Greeting (reflected XSS)</a></li>"
         "<li><a href='/ping?host=127.0.0.1'>Ping (command injection)</a></li>"
-        "<li><a href='/logout'>Logout</a></li>"
-        "</ul>"
+        "<li>"
+        "<form method='post' action='/logout' style='display:inline;'>"
+        "{{ logout_form.csrf_token }}"
+        "<button type='submit'>Logout</button>"
+        "</form>"
+        "</li>"
+        "</ul>",
+        logout_form=logout_form,
     )
 
 
@@ -159,13 +183,20 @@ def index():
 # SQL query string to the client, and result fields are limited to only `id`
 # and `username` (excluding the `email` column) to avoid leaking sensitive
 # user data and internal query structure.
+# FIXED: User enumeration via unrestricted wildcard search (IDOR) — the query
+# now uses an exact-match comparison (=) instead of LIKE, preventing wildcard
+# characters such as '%' or '_' from matching arbitrary rows. The endpoint
+# still requires authentication, and only the requested username is returned.
 @app.route("/search")
 @login_required
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username FROM users WHERE username LIKE ? ORDER BY username"
+    # Use exact match (=) rather than LIKE to prevent wildcard-based user
+    # enumeration. A supplied '%' or '_' will now only match a literal record
+    # with that exact username, not every row in the table.
+    query = "SELECT id, username FROM users WHERE username = ? ORDER BY username"
     try:
         cur.execute(query, (username,))
         rows = cur.fetchall()
