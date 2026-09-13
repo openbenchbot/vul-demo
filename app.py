@@ -67,15 +67,16 @@ def index():
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIXED #2: SQL Injection — user input is now passed using a parameterised query.
 @app.route("/search")
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE '" + username + "' ORDER BY username"
+    # Use a placeholder (?) to separate code from data and prevent SQL injection
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (username,))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
