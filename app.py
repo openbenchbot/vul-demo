@@ -6,10 +6,11 @@ Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
 import os
+import re
 import sqlite3
 import subprocess
 
-from flask import Flask, request, render_template_string, g
+from flask import Flask, request, render_template_string, g, session, abort
 
 app = Flask(__name__)
 
@@ -68,18 +69,23 @@ def index():
 
 
 # FIXED: SQL Injection — using parameterized query instead of string concatenation.
+# FIXED: Unauthenticated data exposure — require a logged-in session and omit
+# the email field so attackers cannot enumerate sensitive user data.
 @app.route("/search")
 def search():
+    # Require authentication before returning any user data.
+    if not session.get("user_id"):
+        abort(401)
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
+    # Only select non-sensitive fields (id, username) — omit email.
+    query = "SELECT id, username FROM users WHERE username LIKE ? ORDER BY username"
     try:
         cur.execute(query, (f"%{username}%",))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
-    # FIXED: Removed raw query from the response to prevent information disclosure.
     return {"results": rows}
 
 
@@ -92,9 +98,13 @@ def greet():
 
 # FIXED: OS Command Injection — pass arguments as a list instead of using shell=True,
 # preventing shell metacharacter injection.
+# FIXED: Validate host input to prevent argument injection into the ping command.
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
+    # Allow only hostnames and IPv4/IPv6-ish strings; reject flags/metacharacters.
+    if not re.match(r"^[A-Za-z0-9.:-]+$", host):
+        abort(400)
     output = subprocess.check_output(
         ["ping", "-c", "2", host], stderr=subprocess.STDOUT
     )
