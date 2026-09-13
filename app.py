@@ -5,10 +5,11 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import re
 import sqlite3
 import subprocess
 
-from flask import Flask, request, render_template_string, g
+from flask import Flask, request, render_template_string, g, abort
 
 app = Flask(__name__)
 
@@ -66,37 +67,61 @@ def index():
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIXED #2: SQL Injection — fixed via parameterized queries and generic error messages.
+# FIXED #6: Missing auth/authorization and excessive data exposure — added auth check
+# before accessing user data and dropped email from the response to prevent PII leakage.
 @app.route("/search")
 def search():
+    # Enforce authentication before accessing user data.
+    # If no authenticated user is present on g, reject with 401 Unauthorized.
+    if not getattr(g, "user", None):
+        abort(401)
+
     username = request.args.get("username", "")
+    # Defense-in-depth: limit input length
+    if len(username) > 100:
+        return "Invalid input", 400
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username = '" + username + "'"
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (f"%{username}%",))
         rows = cur.fetchall()
     except Exception as e:
-        return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+        return "Query error", 500
+    # Return only non-sensitive fields (omit email) to prevent personal data exposure
+    results = [{"id": r[0], "username": r[1]} for r in rows]
+    return {"results": results}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIXED #3: Reflected XSS — pass user input as a template variable so Jinja2
+# auto-escaping applies, instead of concatenating raw input into the template.
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Hello, " + name + "!</h1>"
-    return render_template_string(template)
+    template = "<h1>Welcome, {{ name }}!</h1>"
+    return render_template_string(template, name=name)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIXED #4: OS Command Injection — input validated and shell=False with list args used.
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
-    output = subprocess.check_output(
-        "ping -c 1 " + host, shell=True, stderr=subprocess.STDOUT
-    )
-    return "<pre>" + output.decode(errors="replace") + "</pre>"
+    # Validate host: only alphanumeric, dots, and hyphens; max 255 chars.
+    if not re.match(r"^[a-zA-Z0-9.\-]+$", host) or len(host) > 255:
+        return "Invalid host", 400
+    try:
+        output = subprocess.check_output(
+            ["ping", "-c", "2", host],
+            shell=False,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        )
+        return "<pre>" + output.decode(errors="replace") + "</pre>"
+    except subprocess.TimeoutExpired:
+        return "Ping timed out", 504
+    except subprocess.CalledProcessError as e:
+        return "<pre>" + e.output.decode(errors="replace") + "</pre>", 500
 
 
 if __name__ == "__main__":
