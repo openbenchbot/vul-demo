@@ -10,8 +10,9 @@ import socket
 import sqlite3
 import subprocess
 import time
+import functools
 
-from flask import Flask, request, render_template_string, g
+from flask import Flask, request, render_template_string, g, abort, session, redirect
 
 app = Flask(__name__)
 
@@ -48,6 +49,23 @@ def close_db(exception):
         db.close()
 
 
+# FIX #6: Add authentication / authorization for sensitive endpoints.
+# login_required ensures a user is present in the request context (g.user);
+# load_user populates g.user from the session on every request.
+def login_required(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if not g.get("user"):
+            abort(401)
+        return f(*args, **kwargs)
+    return wrapper
+
+
+@app.before_request
+def load_user():
+    g.user = session.get("user")
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -81,8 +99,25 @@ def index():
     )
 
 
+# Minimal login endpoint so the demo can obtain a session for protected routes.
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        if request.form.get("password") == ADMIN_PASSWORD:
+            session["user"] = "admin"
+            return redirect("/")
+        return "Invalid credentials", 401
+    return (
+        "<form method='post'>"
+        "<input name='password' placeholder='password'>"
+        "<button type='submit'>Login</button>"
+        "</form>"
+    )
+
+
 # VULN #2: SQL Injection — user input concatenated directly into the query.
 @app.route("/search")
+@login_required
 def search():
     username = request.args.get("username", "")
     db = get_db()
@@ -98,6 +133,7 @@ def search():
 
 # VULN #3: Reflected XSS — untrusted input rendered without escaping.
 @app.route("/greet")
+@login_required
 def greet():
     name = request.args.get("name", "")
     template = "<h1>Welcome, " + name + "!</h1>"
@@ -109,6 +145,7 @@ def greet():
 #   - Avoiding system command invocation; using a socket-based check instead.
 #   - Adding basic per-client rate limiting and request logging.
 @app.route("/ping")
+@login_required
 def ping():
     host = request.args.get("host", "example.com")
     # Strict allowlist validation: only alphanumeric, dots, and hyphens.
