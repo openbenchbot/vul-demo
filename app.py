@@ -81,12 +81,23 @@ def search():
     return {"query": query, "results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIX #3: Use Jinja2 template variables instead of string concatenation.
+# Passing user input through {{ name }} ensures Jinja2 auto-escaping is
+# applied, preventing both SSTI (template expressions are not executed
+# because the input is now treated as a data value, not template source)
+# and reflected XSS (HTML special characters are escaped).
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Welcome, " + name + "!</h1>"
-    return render_template_string(template)
+    return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=name)
+
+
+# Defense-in-depth: set a restrictive Content-Security-Policy header to
+# mitigate XSS even if an escaping bug is introduced elsewhere.
+@app.after_request
+def set_csp(response):
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'"
+    return response
 
 
 # VULN #4: OS Command Injection — user input passed to a shell.
