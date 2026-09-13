@@ -5,6 +5,7 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import re
 import sqlite3
 import subprocess
 
@@ -89,14 +90,25 @@ def greet():
     return render_template_string(template)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIXED: OS Command Injection — validate host and use shell=False with list args.
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
-    output = subprocess.check_output(
-        "ping -c 2 " + host, shell=True, stderr=subprocess.STDOUT
-    )
-    return "<pre>" + output.decode(errors="replace") + "</pre>"
+    # Validate host: only alphanumeric, dots, and hyphens allowed; max 255 chars.
+    if not re.match(r"^[a-zA-Z0-9.\-]+$", host) or len(host) > 255:
+        return "Invalid host", 400
+    try:
+        output = subprocess.check_output(
+            ["ping", "-c", "2", host],
+            shell=False,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        )
+        return "<pre>" + output.decode(errors="replace") + "</pre>"
+    except subprocess.TimeoutExpired:
+        return "Ping timed out", 504
+    except subprocess.CalledProcessError as e:
+        return "<pre>" + e.output.decode(errors="replace") + "</pre>", 500
 
 
 if __name__ == "__main__":
