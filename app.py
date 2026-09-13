@@ -85,12 +85,13 @@ def search():
     return {"results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIXED #3: Reflected XSS — pass user input as a template variable so Jinja2
+# auto-escaping applies, instead of concatenating raw input into the template.
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Welcome, " + name + "!</h1>"
-    return render_template_string(template)
+    template = "<h1>Welcome, {{ name }}!</h1>"
+    return render_template_string(template, name=name)
 
 
 # FIXED #4: OS Command Injection — input validated and shell=False with list args used.
