@@ -5,6 +5,7 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import os
 import sqlite3
 import subprocess
 
@@ -14,9 +15,9 @@ app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
+# FIXED: Use environment variables for secrets instead of hardcoding them.
+SECRET_KEY = os.environ.get("SECRET_KEY", os.urandom(32))
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme")
 app.config["SECRET_KEY"] = SECRET_KEY
 
 
@@ -89,17 +90,20 @@ def greet():
     return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=name)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIXED: OS Command Injection — pass arguments as a list instead of using shell=True,
+# preventing shell metacharacter injection.
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
     output = subprocess.check_output(
-        "ping -c 2 " + host, shell=True, stderr=subprocess.STDOUT
+        ["ping", "-c", "2", host], stderr=subprocess.STDOUT
     )
     return "<pre>" + output.decode(errors="replace") + "</pre>"
 
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIXED: Debug mode disabled to prevent exposure of the interactive debugger.
+    # FIXED: Bind to localhost (127.0.0.1) instead of 0.0.0.0 to avoid exposing
+    # the server on a public interface.
+    app.run(host="127.0.0.1", port=5000, debug=False)
