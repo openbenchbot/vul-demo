@@ -82,12 +82,12 @@ def search():
     return {"query": query, "results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIXED: Reflected XSS — untrusted input is now rendered using Jinja2's automatic escaping.
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Welcome, " + name + "!</h1>"
-    return render_template_string(template)
+    template = "<h1>Welcome, {{ name }}!</h1>"
+    return render_template_string(template, name=name)
 
 
 # FIXED: OS Command Injection — validate host and use shell=False with list args.
