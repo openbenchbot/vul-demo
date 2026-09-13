@@ -6,8 +6,10 @@ Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
 import re
+import socket
 import sqlite3
 import subprocess
+import time
 
 from flask import Flask, request, render_template_string, g
 
@@ -19,6 +21,18 @@ DB_PATH = "users.db"
 SECRET_KEY = "super-secret-hardcoded-key-12345"
 ADMIN_PASSWORD = "admin123"
 app.config["SECRET_KEY"] = SECRET_KEY
+
+# FIX #4: Whitelist of allowed hosts to prevent SSRF / network scanning.
+# Only explicitly permitted external hosts may be pinged.
+ALLOWED_PING_HOSTS = {
+    "example.com",
+    "8.8.8.8",
+}
+
+# Minimal in-memory rate limiting for the /ping endpoint.
+_PING_RATE_LIMIT = {}
+_PING_RATE_WINDOW = 60  # seconds
+_PING_RATE_MAX = 10     # max requests per window per client
 
 
 def get_db():
@@ -62,7 +76,7 @@ def index():
         "<ul>"
         "<li><a href='/search?username=alice'>User search (SQL injection)</a></li>"
         "<li><a href='/greet?name=World'>Greeting (reflected XSS)</a></li>"
-        "<li><a href='/ping?host=127.0.0.1'>Ping (command injection)</a></li>"
+        "<li><a href='/ping?host=example.com'>Ping (restricted host allowlist)</a></li>"
         "</ul>"
     )
 
@@ -90,27 +104,63 @@ def greet():
     return render_template_string(template)
 
 
-# FIX #4: OS Command Injection mitigated by validating host input, using
-# shell=False with list-based arguments, and adding a timeout.
+# FIX #4: SSRF / network scanning mitigated by:
+#   - Enforcing a strict whitelist of allowed hosts (ALLOWED_PING_HOSTS).
+#   - Avoiding system command invocation; using a socket-based check instead.
+#   - Adding basic per-client rate limiting and request logging.
 @app.route("/ping")
 def ping():
-    host = request.args.get("host", "127.0.0.1")
+    host = request.args.get("host", "example.com")
     # Strict allowlist validation: only alphanumeric, dots, and hyphens.
     if not re.match(r'^[a-zA-Z0-9.\-]+$', host) or len(host) > 255:
         return "Invalid host", 400
+    # Enforce whitelist to prevent SSRF / internal network scanning.
+    if host not in ALLOWED_PING_HOSTS:
+        return "Host not allowed", 403
+
+    # Basic rate limiting per client IP to mitigate abuse.
+    client_ip = request.remote_addr or "unknown"
+    now = time.time()
+    entries = _PING_RATE_LIMIT.get(client_ip, [])
+    entries = [t for t in entries if now - t < _PING_RATE_WINDOW]
+    if len(entries) >= _PING_RATE_MAX:
+        return "Rate limit exceeded", 429
+    entries.append(now)
+    _PING_RATE_LIMIT[client_ip] = entries
+
+    app.logger.info("Ping request for allowed host %s from %s", host, client_ip)
+
     try:
-        # shell=False with a list prevents shell metacharacter interpretation.
-        output = subprocess.check_output(
-            ["ping", "-c", "2", host],
-            shell=False,
-            stderr=subprocess.STDOUT,
-            timeout=5,
-        )
-        return "<pre>" + output.decode(errors="replace") + "</pre>"
-    except subprocess.TimeoutExpired:
-        return "Ping timed out", 504
-    except subprocess.CalledProcessError as e:
-        return "<pre>" + e.output.decode(errors="replace") + "</pre>", 500
+        # Use a non-privileged socket reachability check instead of invoking
+        # the system `ping` binary, avoiding command-execution risks entirely.
+        socket.setdefaulttimeout(5)
+        addrinfo = socket.getaddrinfo(host, None)
+        reachable = False
+        resolved = []
+        for family, _, _, _, sockaddr in addrinfo:
+            ip = sockaddr[0]
+            resolved.append(ip)
+            try:
+                s = socket.socket(family, socket.SOCK_STREAM)
+                s.settimeout(3)
+                # Attempt a TCP connect to a discarded port (e.g. 9) purely
+                # to test reachability without relying on ICMP/system ping.
+                s.connect((ip, 9))
+                s.close()
+                reachable = True
+                break
+            except OSError:
+                continue
+        result = {
+            "host": host,
+            "resolved_addresses": resolved,
+            "reachable": reachable,
+        }
+        return "<pre>" + repr(result) + "</pre>"
+    except socket.gaierror as e:
+        return f"<pre>DNS resolution failed: {e}</pre>", 500
+    except Exception as e:
+        return f"<pre>Error: {e}</pre>", 500
 
 
 if __name__ == "__main__":
