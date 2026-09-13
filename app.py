@@ -10,6 +10,7 @@ import re
 import sqlite3
 import subprocess
 from functools import wraps
+from urllib.parse import urlparse, urljoin
 
 from flask import Flask, request, render_template_string, g, session, redirect, url_for, Response
 
@@ -81,6 +82,14 @@ def login_required(f):
     return decorated
 
 
+# FIXED: Open Redirect — added a helper function to validate that a redirect
+# target URL is safe (i.e., points to the same host as the application).
+def is_safe_url(target):
+    ref_url = urlparse(request.host_url)
+    test_url = urlparse(urljoin(request.host_url, target))
+    return test_url.scheme in ("http", "https") and ref_url.netloc == test_url.netloc
+
+
 # FIXED: Login endpoint lacks CSRF protection — added a FlaskForm-based
 # LoginForm that includes a CSRF token. The token is rendered in the form
 # template and validated automatically by validate_on_submit().
@@ -95,7 +104,12 @@ def login():
     if form.validate_on_submit():
         if form.password.data == ADMIN_PASSWORD:
             session["authenticated"] = True
-            nxt = request.args.get("next") or url_for("index")
+            # FIXED: Open Redirect — validate the 'next' parameter before
+            # redirecting. If it is missing or points to an external host,
+            # fall back to the index route.
+            nxt = request.args.get("next")
+            if not nxt or not is_safe_url(nxt):
+                nxt = url_for("index")
             return redirect(nxt)
         error = "Invalid password"
     return render_template_string(
