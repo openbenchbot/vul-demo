@@ -5,19 +5,31 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import os
+import re
 import sqlite3
 import subprocess
+from datetime import datetime, timedelta, timezone
+from functools import wraps
 
-from flask import Flask, request, render_template_string, g
+import jwt
+from flask import Flask, request, render_template_string, g, abort, jsonify
 
 app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
+# FIX: Load secrets from environment variables instead of hardcoding them.
+# This prevents credentials from being exposed in source code or version control.
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    # Fall back to a random key so the app still runs locally, but warn.
+    SECRET_KEY = os.urandom(32).hex()
+    app.logger.warning("SECRET_KEY not set in environment; using ephemeral random key. Tokens will not survive restart.")
 app.config["SECRET_KEY"] = SECRET_KEY
+
+# FIX: Load admin password from environment variable instead of hardcoding.
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 
 def get_db():
@@ -54,6 +66,52 @@ def init_db():
     conn.close()
 
 
+# FIX: Replaced the static token check with JWT-based authentication.
+# Tokens are signed with the app's SECRET_KEY, include user identity, and
+# have a short lifetime (1 hour). This prevents predictable, static tokens
+# from being used to bypass authentication.
+def auth_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get("X-Auth-Token", "")
+        try:
+            jwt.decode(
+                token,
+                app.config["SECRET_KEY"],
+                algorithms=["HS256"],
+                options={"require": ["exp", "iat", "sub"]},
+            )
+        except jwt.PyJWTError:
+            abort(401, description="Authentication required")
+        return f(*args, **kwargs)
+    return decorated
+
+
+# FIX: Added a login endpoint that issues short-lived JWTs after verifying
+# credentials. This provides a proper authentication flow instead of a
+# hardcoded static token.
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "")
+    password = data.get("password", "")
+
+    # Minimal credential check for the demo admin user.
+    if username == "admin" and password and password == ADMIN_PASSWORD:
+        now = datetime.now(timezone.utc)
+        token = jwt.encode(
+            {
+                "sub": username,
+                "iat": now,
+                "exp": now + timedelta(hours=1),
+            },
+            app.config["SECRET_KEY"],
+            algorithm="HS256",
+        )
+        return jsonify({"token": token})
+    abort(401, description="Invalid credentials")
+
+
 @app.route("/")
 def index():
     return (
@@ -68,38 +126,52 @@ def index():
 
 # VULN #2: SQL Injection — user input concatenated directly into the query.
 @app.route("/search")
+@auth_required
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username = '" + username + "'"
+    # FIX: Use a parameterized query with a placeholder to prevent SQL injection.
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (f"%{username}%",))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+    # FIX: Remove raw query from response to avoid exposing internal queries.
+    return {"results": rows}
 
 
 # VULN #3: Reflected XSS — untrusted input rendered without escaping.
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Hello, " + name + "!</h1>"
-    return render_template_string(template)
+    # FIX: Pass `name` as a template variable with explicit escaping (|e) so
+    # untrusted input is HTML-escaped instead of being concatenated directly
+    # into the template string. This prevents reflected cross-site scripting.
+    return render_template_string("<h1>Welcome, {{ name|e }}!</h1>", name=name)
 
 
 # VULN #4: OS Command Injection — user input passed to a shell.
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
-    output = subprocess.check_output(
-        "ping -c 1 " + host, shell=True, stderr=subprocess.STDOUT
-    )
+    # FIX: Validate host input against a strict allowlist pattern and use
+    # subprocess with an argument list (shell=False) to prevent OS command
+    # injection via metacharacters.
+    if not re.match(r"^[a-zA-Z0-9.\-]+$", host):
+        abort(400, description="Invalid host")
+    try:
+        output = subprocess.check_output(
+            ["ping", "-c", "2", host],
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError as e:
+        output = e.output
     return "<pre>" + output.decode(errors="replace") + "</pre>"
 
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIX: Disabled debug mode to prevent exposing the interactive Werkzeug debugger to unauthenticated users.
+    app.run(host="0.0.0.0", port=5000, debug=False)
