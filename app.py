@@ -36,6 +36,14 @@ if not ADMIN_PASSWORD:
     raise RuntimeError("ADMIN_PASSWORD environment variable not set")
 app.config["SECRET_KEY"] = SECRET_KEY
 
+# FIXED: Session cookies lack Secure and SameSite attributes — configure
+# Flask to set the Secure flag (cookies only sent over HTTPS) and SameSite
+# (Lax) to mitigate cross-site request forgery (CSRF) risks.
+app.config.update(
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
 
 def get_db():
     if "db" not in g:
@@ -147,19 +155,23 @@ def index():
 
 
 # FIXED: SQL Injection — user input is now passed as a parameter to the query.
+# FIXED: Information Exposure — the /search endpoint no longer returns the raw
+# SQL query string to the client, and result fields are limited to only `id`
+# and `username` (excluding the `email` column) to avoid leaking sensitive
+# user data and internal query structure.
 @app.route("/search")
 @login_required
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
+    query = "SELECT id, username FROM users WHERE username LIKE ? ORDER BY username"
     try:
         cur.execute(query, (username,))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+    return {"results": [{"id": r[0], "username": r[1]} for r in rows]}
 
 
 # FIXED: Server-Side Template Injection — the /greet endpoint no longer uses
