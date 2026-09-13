@@ -13,6 +13,11 @@ from functools import wraps
 
 from flask import Flask, request, render_template_string, g, session, redirect, url_for, Response
 
+# FIXED: Added Flask-WTF import for CSRF protection on the login form.
+from flask_wtf import FlaskForm
+from wtforms import PasswordField
+from wtforms.validators import DataRequired
+
 app = Flask(__name__)
 
 DB_PATH = "users.db"
@@ -21,7 +26,12 @@ DB_PATH = "users.db"
 SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("FLASK_SECRET_KEY environment variable not set")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# FIXED: Remove hardcoded fallback "admin123". Require ADMIN_PASSWORD to be set
+# explicitly via environment variable; fail fast if missing to prevent use of
+# a known default credential.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+if not ADMIN_PASSWORD:
+    raise RuntimeError("ADMIN_PASSWORD environment variable not set")
 app.config["SECRET_KEY"] = SECRET_KEY
 
 
@@ -71,12 +81,19 @@ def login_required(f):
     return decorated
 
 
+# FIXED: Login endpoint lacks CSRF protection — added a FlaskForm-based
+# LoginForm that includes a CSRF token. The token is rendered in the form
+# template and validated automatically by validate_on_submit().
+class LoginForm(FlaskForm):
+    password = PasswordField("Password", validators=[DataRequired()])
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    form = LoginForm()
     error = None
-    if request.method == "POST":
-        password = request.form.get("password", "")
-        if password == ADMIN_PASSWORD:
+    if form.validate_on_submit():
+        if form.password.data == ADMIN_PASSWORD:
             session["authenticated"] = True
             nxt = request.args.get("next") or url_for("index")
             return redirect(nxt)
@@ -85,9 +102,11 @@ def login():
         "<h1>Login</h1>"
         "{% if error %}<p>{{ error }}</p>{% endif %}"
         "<form method='post'>"
-        "<input type='password' name='password' placeholder='Password'>"
+        "{{ form.csrf_token }}"
+        "{{ form.password(placeholder='Password') }}"
         "<button type='submit'>Login</button>"
         "</form>",
+        form=form,
         error=error,
     )
 
