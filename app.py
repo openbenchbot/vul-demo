@@ -5,20 +5,31 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import os
+import re
 import sqlite3
 import subprocess
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, request, render_template_string, g, abort
+import jwt
+from flask import Flask, request, render_template_string, g, abort, jsonify
 
 app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
+# FIX: Load secrets from environment variables instead of hardcoding them.
+# This prevents credentials from being exposed in source code or version control.
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    # Fall back to a random key so the app still runs locally, but warn.
+    SECRET_KEY = os.urandom(32).hex()
+    app.logger.warning("SECRET_KEY not set in environment; using ephemeral random key. Tokens will not survive restart.")
 app.config["SECRET_KEY"] = SECRET_KEY
+
+# FIX: Load admin password from environment variable instead of hardcoding.
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 
 def get_db():
@@ -55,15 +66,50 @@ def init_db():
     conn.close()
 
 
-# FIX: Added an authentication decorator to protect sensitive endpoints
+# FIX: Replaced the static token check with JWT-based authentication.
+# Tokens are signed with the app's SECRET_KEY, include user identity, and
+# have a short lifetime (1 hour). This prevents predictable, static tokens
+# from being used to bypass authentication.
 def auth_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        # Simple token-based authentication check for demonstration purposes
-        if request.headers.get("X-Auth-Token") != "valid-token":
+        token = request.headers.get("X-Auth-Token", "")
+        try:
+            jwt.decode(
+                token,
+                app.config["SECRET_KEY"],
+                algorithms=["HS256"],
+                options={"require": ["exp", "iat", "sub"]},
+            )
+        except jwt.PyJWTError:
             abort(401, description="Authentication required")
         return f(*args, **kwargs)
     return decorated
+
+
+# FIX: Added a login endpoint that issues short-lived JWTs after verifying
+# credentials. This provides a proper authentication flow instead of a
+# hardcoded static token.
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "")
+    password = data.get("password", "")
+
+    # Minimal credential check for the demo admin user.
+    if username == "admin" and password and password == ADMIN_PASSWORD:
+        now = datetime.now(timezone.utc)
+        token = jwt.encode(
+            {
+                "sub": username,
+                "iat": now,
+                "exp": now + timedelta(hours=1),
+            },
+            app.config["SECRET_KEY"],
+            algorithm="HS256",
+        )
+        return jsonify({"token": token})
+    abort(401, description="Invalid credentials")
 
 
 @app.route("/")
@@ -110,9 +156,18 @@ def greet():
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
-    output = subprocess.check_output(
-        "ping -c 2 " + host, shell=True, stderr=subprocess.STDOUT
-    )
+    # FIX: Validate host input against a strict allowlist pattern and use
+    # subprocess with an argument list (shell=False) to prevent OS command
+    # injection via metacharacters.
+    if not re.match(r"^[a-zA-Z0-9.\-]+$", host):
+        abort(400, description="Invalid host")
+    try:
+        output = subprocess.check_output(
+            ["ping", "-c", "2", host],
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError as e:
+        output = e.output
     return "<pre>" + output.decode(errors="replace") + "</pre>"
 
 
