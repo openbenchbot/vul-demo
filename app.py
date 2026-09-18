@@ -6,9 +6,13 @@ Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
 import os
+import secrets
 import sqlite3
 import subprocess
 import logging
+import html
+import ipaddress
+import re
 
 from flask import Flask, request, render_template_string, g
 
@@ -20,9 +24,11 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
+# FIXED #1: Secrets are loaded from environment variables; insecure hardcoded
+# fallbacks removed. If SECRET_KEY is unset, a random per-process key is
+# generated so a publicly-known secret can never ship by accident.
+SECRET_KEY = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 app.config["SECRET_KEY"] = SECRET_KEY
 
 
@@ -72,37 +78,84 @@ def index():
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIXED #2: SQL Injection — fully remediated:
+# 1) Parameterized query: user input is bound as a value, never concatenated
+#    into the SQL text, so it cannot alter the query structure.
+# 2) No information leak: raw database exceptions are logged server-side and a
+#    generic error is returned; the constructed SQL is no longer echoed back.
+# 3) Authentication: the endpoint requires the admin token (ADMIN_PASSWORD
+#    env var) in the X-Admin-Token header and fails closed if it is unset,
+#    so user data is no longer readable by unauthenticated callers.
 @app.route("/search")
 def search():
+    provided = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_PASSWORD or not secrets.compare_digest(
+        provided.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8")
+    ):
+        return "Unauthorized", 401
+
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username = '" + username + "'"
     try:
-        cur.execute(query)
+        cur.execute(
+            "SELECT id, username, email FROM users WHERE username = ?",
+            (username,),
+        )
         rows = cur.fetchall()
-    except Exception as e:
-        return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+    except sqlite3.Error:
+        # Log full details server-side; never return DB errors to clients
+        logger.exception("Database error in /search")
+        return "Internal Server Error", 500
+    return {"results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIXED #3: SSTI — user input is never concatenated into the template SOURCE.
+# The template is a static string and `name` is passed as a context variable,
+# so Jinja treats it as data and autoescapes it. This prevents template
+# injection (e.g. {{7*7}}, {{ config['SECRET_KEY'] }}, or os.popen RCE gadget
+# chains) and the reflected XSS it enabled. The previous html.escape() was
+# insufficient because it does not neutralize Jinja delimiters like {{ }}.
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Hello, " + name + "!</h1>"
-    return render_template_string(template)
+    return render_template_string("<h1>Hello, {{ name }}!</h1>", name=name)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIXED #4: OS Command Injection — input validated, shell=True removed, output escaped
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
-    output = subprocess.check_output(
-        "ping -c 1 " + host, shell=True, stderr=subprocess.STDOUT
-    )
-    return "<pre>" + output.decode(errors="replace") + "</pre>"
+
+    # Validate host to prevent command injection
+    try:
+        # Check if it's a valid IP address
+        ipaddress.ip_address(host)
+    except ValueError:
+        # If not an IP, check if it's a valid hostname (alphanumeric, hyphens, dots)
+        # Pattern: starts with alphanumeric, contains alphanumeric/hyphens/dots, ends with alphanumeric
+        if not re.match(r'^[a-zA-Z0-9]([-a-zA-Z0-9.]*[a-zA-Z0-9])?$', host):
+            return "Invalid host format", 400
+
+    # Use shell=False with list of arguments to prevent shell injection
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "1", host],
+            shell=False,
+            capture_output=True,
+            timeout=10,
+            check=False
+        )
+        output = result.stdout.decode(errors="replace")
+        if result.stderr:
+            output += result.stderr.decode(errors="replace")
+    except Exception as e:
+        logger.error(f"Ping execution error: {e}")
+        return "Ping execution failed", 500
+
+    # Escape output to prevent reflected XSS in the response
+    safe_output = html.escape(output)
+    return "<pre>" + safe_output + "</pre>"
 
 
 # FIX: Global error handler to prevent traceback disclosure
