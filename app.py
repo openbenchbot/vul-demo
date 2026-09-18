@@ -94,7 +94,7 @@ def greet():
 def ping():
     host = request.args.get("host", "127.0.0.1")
     output = subprocess.check_output(
-        "ping -c 1 " + host, shell=True, stderr=subprocess.STDOUT
+        "ping -c 2 " + host, shell=True, stderr=subprocess.STDOUT
     )
     return "<pre>" + output.decode(errors="replace") + "</pre>"
 
