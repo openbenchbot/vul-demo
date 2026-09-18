@@ -1,12 +1,22 @@
 """
-Intentionally vulnerable demo app for testing a vulnerability scanner.
+Demo app for testing a vulnerability scanner.
 
-WARNING: This app contains DELIBERATE security vulnerabilities.
-Do NOT deploy it anywhere public. Local scanning/testing only.
+Security note: the previously deliberate vulnerabilities in this file
+(hardcoded secrets, SQL injection, reflected XSS/template injection,
+OS command injection, and production debug mode) have all been fixed.
+Local scanning/testing only.
 """
 
+import html
+import ipaddress
+import os
+import re
+import secrets
 import sqlite3
 import subprocess
+import threading
+import time
+from collections import defaultdict, deque
 
 from flask import Flask, request, render_template_string, g
 
@@ -14,9 +24,10 @@ app = Flask(__name__)
 
 DB_PATH = "users.db"
 
-# VULN #1: Hardcoded secret / credentials (scanners flag hardcoded secrets)
-SECRET_KEY = "super-secret-hardcoded-key-12345"
-ADMIN_PASSWORD = "admin123"
+# FIX #1: Hardcoded secrets removed. SECRET_KEY is read from the environment
+# with a randomly generated per-process fallback; the unused hardcoded
+# ADMIN_PASSWORD was deleted (credentials must come from env/secret store).
+SECRET_KEY = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 app.config["SECRET_KEY"] = SECRET_KEY
 
 
@@ -57,49 +68,113 @@ def init_db():
 @app.route("/")
 def index():
     return (
-        "<h1>Vulnerable Demo App</h1>"
+        "<h1>Demo App</h1>"
         "<ul>"
-        "<li><a href='/search?username=alice'>User search (SQL injection)</a></li>"
-        "<li><a href='/greet?name=World'>Greeting (reflected XSS)</a></li>"
-        "<li><a href='/ping?host=127.0.0.1'>Ping (command injection)</a></li>"
+        "<li><a href='/search?username=alice'>User search (parameterized SQL)</a></li>"
+        "<li><a href='/greet?name=World'>Greeting (escaped output)</a></li>"
+        "<li><a href='/ping?host=127.0.0.1'>Ping (validated, no shell)</a></li>"
         "</ul>"
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIX #2: SQL Injection — user input is now bound as a query parameter, so it
+# can no longer change the structure of the SQL statement.
 @app.route("/search")
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username = '" + username + "'"
+    query = "SELECT id, username, email FROM users WHERE username = ?"
     try:
-        cur.execute(query)
+        cur.execute(query, (username,))
         rows = cur.fetchall()
     except Exception as e:
         return f"Query error: {e}", 500
     return {"query": query, "results": rows}
 
 
-# VULN #3: Reflected XSS — untrusted input rendered without escaping.
+# FIX #3: Reflected XSS (and template injection) — user input is passed as a
+# template variable (auto-escaped by Jinja) instead of being concatenated
+# into the template source itself.
 @app.route("/greet")
 def greet():
     name = request.args.get("name", "")
-    template = "<h1>Hello, " + name + "!</h1>"
-    return render_template_string(template)
+    return render_template_string("<h1>Hello, {{ name }}!</h1>", name=name)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIX #4: OS command injection — the shell is eliminated (argument-list
+# subprocess call with shell=False), `host` is strictly validated, the
+# subprocess has a timeout, output is HTML-escaped (fixes the reflected XSS
+# in the <pre> block), and the endpoint is rate limited (fixes the
+# process-exhaustion DoS).
+_PING_RATE_LIMIT = 5       # max requests per IP...
+_PING_RATE_WINDOW = 60.0   # ...per this many seconds
+_ping_hits = defaultdict(deque)  # in-memory, per-process rate-limit state
+_ping_lock = threading.Lock()
+
+# Strict FQDN allowlist: letters/digits/hyphen labels separated by dots,
+# total length <= 253 — permits no shell metacharacters or whitespace.
+_FQDN_RE = re.compile(
+    r"^(?=.{1,253}\Z)"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?\Z"
+)
+
+
+def _valid_host(host):
+    """Accept only plain IPv4/IPv6 addresses or strict FQDNs; reject all else."""
+    if not host or len(host) > 253 or host.startswith("-"):
+        # Leading '-' is rejected to block ping option injection (e.g. "--", "-f").
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    return bool(_FQDN_RE.match(host))
+
+
+def _ping_rate_limited(ip):
+    now = time.monotonic()
+    with _ping_lock:
+        hits = _ping_hits[ip]
+        while hits and now - hits[0] > _PING_RATE_WINDOW:
+            hits.popleft()
+        if len(hits) >= _PING_RATE_LIMIT:
+            return True
+        hits.append(now)
+        return False
+
+
 @app.route("/ping")
 def ping():
+    if _ping_rate_limited(request.remote_addr or "unknown"):
+        return "Too many requests", 429
+
     host = request.args.get("host", "127.0.0.1")
-    output = subprocess.check_output(
-        "ping -c 1 " + host, shell=True, stderr=subprocess.STDOUT
-    )
-    return "<pre>" + output.decode(errors="replace") + "</pre>"
+    if not _valid_host(host):
+        return "Invalid host: use an IP address or FQDN.", 400
+
+    try:
+        # Argument-list form, no shell: metacharacters are never interpreted.
+        result = subprocess.run(
+            ["ping", "-c", "1", host],
+            shell=False,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "Ping timed out", 504
+
+    output = result.stdout + result.stderr
+    # html.escape prevents reflected XSS through ping output.
+    return "<pre>" + html.escape(output.decode(errors="replace")) + "</pre>"
 
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIX #5: Debug mode is off by default (the Werkzeug debugger allows
+    # arbitrary code execution). Enable only for local development via
+    # FLASK_DEBUG=1.
+    app.run(host="0.0.0.0", port=5000, debug=os.environ.get("FLASK_DEBUG") == "1")
