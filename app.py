@@ -5,12 +5,18 @@ WARNING: This app contains DELIBERATE security vulnerabilities.
 Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
+import os
 import sqlite3
 import subprocess
+import logging
 
 from flask import Flask, request, render_template_string, g
 
 app = Flask(__name__)
+
+# Configure logging for security events
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 DB_PATH = "users.db"
 
@@ -99,7 +105,17 @@ def ping():
     return "<pre>" + output.decode(errors="replace") + "</pre>"
 
 
+# FIX: Global error handler to prevent traceback disclosure
+# Ensures unhandled exceptions return generic error without sensitive details
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Unhandled exception: {e}", exc_info=True)
+    return "Internal Server Error", 500
+
+
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # FIX: Disable debug mode by default; gate on FLASK_DEBUG environment variable.
+    # Bind to 127.0.0.1 instead of 0.0.0.0 to prevent external exposure.
+    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host="127.0.0.1", port=5000, debug=debug_mode)
