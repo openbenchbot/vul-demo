@@ -6,11 +6,12 @@ Do NOT deploy it anywhere public. Local scanning/testing only.
 """
 
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
 
-from flask import Flask, request, render_template_string, g
+from flask import Flask, request, render_template_string, g, escape
 
 app = Flask(__name__)
 
@@ -72,19 +73,24 @@ def index():
     )
 
 
-# VULN #2: SQL Injection — user input concatenated directly into the query.
+# FIXED: SQL Injection vulnerability - now using parameterized queries.
 @app.route("/search")
 def search():
     username = request.args.get("username", "")
     db = get_db()
     cur = db.cursor()
-    query = "SELECT id, username, email FROM users WHERE username LIKE '" + username + "' ORDER BY username"
+    # SECURITY FIX: Use parameterized query with ? placeholder to prevent SQL injection.
+    # This ensures user input is treated as a literal value rather than executable SQL code.
+    query = "SELECT id, username, email FROM users WHERE username LIKE ? ORDER BY username"
     try:
-        cur.execute(query)
+        cur.execute(query, (username,))
         rows = cur.fetchall()
-    except Exception as e:
-        return f"Query error: {e}", 500
-    return {"query": query, "results": rows}
+    except Exception:
+        # SECURITY FIX: Do not expose raw exception messages to prevent information disclosure
+        app.logger.exception("Database query failed")
+        return {"error": "An internal error occurred."}, 500
+    # SECURITY FIX: Remove raw query string from response to prevent query structure exposure
+    return {"results": rows}
 
 
 # FIXED: Pass user input as a template variable so Jinja2 auto-escaping
@@ -96,17 +102,46 @@ def greet():
     return render_template_string("<h1>Welcome, {{ name }}!</h1>", name=name)
 
 
-# VULN #4: OS Command Injection — user input passed to a shell.
+# FIXED: OS Command Injection - replaced shell=True with shell=False and added input validation.
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
-    output = subprocess.check_output(
-        "ping -c 2 " + host, shell=True, stderr=subprocess.STDOUT
-    )
-    return "<pre>" + output.decode(errors="replace") + "</pre>"
+    # SECURITY FIX: Strict validation of host parameter to prevent command injection.
+    # Only allows alphanumeric characters, dots, and hyphens (valid hostname characters).
+    # RFC 1123 specifies max hostname length of 253 characters.
+    if not re.match(r'^[a-zA-Z0-9.\\-]+$', host) or len(host) > 253:
+        return "Invalid host", 400
+    try:
+        # SECURITY FIX: Use shell=False with list argument to prevent shell metacharacter injection.
+        # Each argument is passed directly to ping without shell interpretation.
+        output = subprocess.check_output(
+            ["ping", "-c", "2", host],
+            shell=False,
+            stderr=subprocess.STDOUT,
+            timeout=10
+        )
+    except subprocess.CalledProcessError as e:
+        output = e.output
+    except subprocess.TimeoutExpired:
+        return "Ping timed out", 504
+    # SECURITY FIX: HTML-escape command output to prevent reflected XSS.
+    # Even with command injection fixes, error messages might contain
+    # user-supplied input that could be interpreted as HTML/JS.
+    return "<pre>" + escape(output.decode(errors="replace")) + "</pre>"
+
+
+# SECURITY FIX: Global error handler to prevent stack trace leakage
+@app.errorhandler(500)
+def handle_500(e):
+    app.logger.exception("Unhandled error")
+    return {"error": "Internal server error"}, 500
 
 
 if __name__ == "__main__":
     init_db()
-    # VULN #5: Debug mode enabled in production (exposes interactive debugger).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # SECURITY FIX: Use environment-based configuration for debug mode and host binding.
+    # Defaults to localhost (127.0.0.1) and debug=False to prevent exposure of 
+    # Werkzeug debugger and stack traces on all network interfaces.
+    debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
+    host_addr = os.environ.get("HOST", "127.0.0.1")
+    app.run(host=host_addr, port=5000, debug=debug_mode)
